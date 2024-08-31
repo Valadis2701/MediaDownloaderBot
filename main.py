@@ -19,58 +19,74 @@ TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Пользователь {update.effective_user.id} запустил бота")
-    await update.message.reply_text('Привет! Я бот, который может скачивать контент с YouTube, TikTok и YouTube Music. Просто отправь мне ссылку.')
+    await update.message.reply_text('Привет! Я бот, который может скачивать контент с YouTube и TikTok. Просто отправь мне ссылку.')
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     text = message.text
+    logger.info(f"Получено сообщение от пользователя {update.effective_user.id}: {text}")
 
-    url_pattern = r'(https?://(?:www\.)?(?:youtube\.com|youtu\.be|music\.youtube\.com|vm\.tiktok\.com|tiktok\.com)\S+)'
+    # Обновлённый паттерн для извлечения ссылок
+    url_pattern = r'(https?://(?:www\.)?(?:youtube\.com|youtu\.be|tiktok\.com|vm\.tiktok\.com|open\.spotify\.com)\S+)'
     urls = re.findall(url_pattern, text)
 
     if urls:
         for url in urls:
             logger.info(f"Обнаружена ссылка: {url}")
-            await download_and_send_media(message, url)
+            await download_and_send_media(update, context, url)
     else:
-        logger.info(f"Сообщение от пользователя {update.effective_user.id} не содержит ссылку и будет проигнорировано.")
+        logger.info("Ссылка не обнаружена")
 
-async def download_and_send_media(message, url):
+async def download_and_send_media(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
+    message = update.message
+    username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
+    text = message.text.replace(url, '').strip()  # Убираем ссылку из текста
+
+    # Формируем сообщение в зависимости от наличия текста
+    if text:
+        caption = f"{username} отправил сообщение с текстом \"{text}\""
+    else:
+        caption = f"{username} поделился файлом"
+
     with tempfile.TemporaryDirectory() as temp_dir:
         logger.info(f"Создана временная директория: {temp_dir}")
         try:
-            ydl_opts = {
-                'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-                'format': 'bestvideo+bestaudio/best',
-                'postprocessors': [],
-            }
-
             if 'music.youtube.com' in url:
-                ydl_opts['format'] = 'bestaudio/best'
-                ydl_opts['postprocessors'] = [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }]
+                ydl_opts = {
+                    'format': 'bestaudio/best',
+                    'postprocessors': [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    }],
+                    'outtmpl': os.path.join(temp_dir, f"{int(message.date.timestamp())}.%(ext)s"),
+                }
+            else:
+                ydl_opts = {
+                    'format': 'best',
+                    'outtmpl': os.path.join(temp_dir, f"{int(message.date.timestamp())}.%(ext)s"),
+                }
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 logger.info("Начало загрузки с yt-dlp")
                 info = ydl.extract_info(url, download=True)
                 filename = ydl.prepare_filename(info)
+                logger.info(f"Файл загружен: {filename}")
 
-                if 'music.youtube.com' in url:
-                    filename = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
-                    with open(filename, 'rb') as file:
-                        logger.info("Отправка аудио")
-                        await message.reply_audio(audio=file, reply_to_message_id=message.message_id)
+            with open(filename, 'rb') as file:
+                if filename.endswith(('.mp4', '.webm')):
+                    await context.bot.send_video(chat_id=message.chat_id, video=file, caption=caption)
+                elif filename.endswith('.mp3'):
+                    await context.bot.send_audio(chat_id=message.chat_id, audio=file, caption=caption)
                 else:
-                    with open(filename, 'rb') as file:
-                        logger.info("Отправка видео")
-                        await message.reply_video(video=file, reply_to_message_id=message.message_id)
+                    await context.bot.send_document(chat_id=message.chat_id, document=file, caption=caption)
 
         except Exception as e:
             logger.error(f"Произошла ошибка: {str(e)}", exc_info=True)
-            await message.reply_text(f'Произошла ошибка при скачивании: {str(e)}', reply_to_message_id=message.message_id)
+            await context.bot.send_message(chat_id=message.chat_id, text=f'Произошла ошибка при скачивании: {str(e)}')
+
+    # Удаление оригинального сообщения с ссылкой
+    await message.delete()
 
 def main():
     logger.info("Запуск бота")
